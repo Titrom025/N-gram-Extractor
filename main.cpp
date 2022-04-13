@@ -3,7 +3,6 @@
 #include <vector>
 #include "filesystem"
 #include <codecvt>
-#include <sstream>
 #include <fstream>
 
 #include "dictionary.h"
@@ -13,7 +12,10 @@
 using namespace std;
 using recursive_directory_iterator = std::__fs::filesystem::recursive_directory_iterator;
 
+int MIN_NGRAM_LENGTH = 2;
+int MAX_NGRAM_LENGTH = 4;
 int CONTEXT_FREQUENCY_THRESHOLD = 5;
+int hGramsHandled = 0;
 
 vector<string> getFilesFromDir(const string& dirPath) {
     vector<string> files;
@@ -23,60 +25,13 @@ vector<string> getFilesFromDir(const string& dirPath) {
     return files;
 }
 
-vector<WordContext> makeAllContexts(vector<vector<Word*>> wordVectors, wstring &stringContext) {
-    vector<vector<Word*>> allWordContexts;
-
-    for (int i = 0; i < wordVectors.size(); i++) {
-        auto& currentVector = wordVectors.at(i);
-        if (i == 0) {
-            set<wstring> handledForms;
-            for (Word *word: currentVector)
-                if (handledForms.find(word->word) == handledForms.end()) {
-                    handledForms.insert(word->word);
-                    allWordContexts.push_back(vector<Word *>{word});
-                }
-        }
-        else if (currentVector.size() == 1) {
-            for (vector<Word*>& context : allWordContexts)
-                context.push_back(currentVector.at(0));
-        } else {
-            vector<vector<Word*>> newAllContexts;
-            set<wstring> handledForms;
-            for (Word *word: currentVector)
-                for (const vector<Word*>& context : allWordContexts) {
-                    if (handledForms.find(word->word) == handledForms.end()) {
-                        handledForms.insert(word->word);
-                        vector<Word*> newContext;
-                        newContext = context;
-                        newContext.push_back(word);
-                        newAllContexts.push_back(newContext);
-                    }
-                }
-            allWordContexts = newAllContexts;
-        }
-    }
-
-    vector<WordContext> allContexts;
-
-    for (const auto& contextVector : allWordContexts) {
-        wstring normalizedForm;
-        for (Word* word : contextVector)
-            normalizedForm += word->word + L" ";
-
-        normalizedForm.pop_back();
-        allContexts.emplace_back(normalizedForm, normalizedForm,contextVector);
-    }
-    return allContexts;
-}
-
-vector<WordContext> processContext(const vector<wstring>& stringContext, unordered_map <wstring, vector<Word*>> *dictionary) {
+WordContext processContext(const vector<wstring>& stringContext, int count, unordered_map <wstring, vector<Word*>> *dictionary) {
     auto& f = std::use_facet<std::ctype<wchar_t>>(std::locale());
 
-    wstring rawContext;
-    vector<vector<Word*>> contextVector;
+    vector<Word*> contextVector;
 
-    for (wstring contextWord: stringContext) {
-        rawContext += contextWord + L" ";
+    for (int i = 0; i < count; i++) {
+        wstring contextWord = stringContext.at(i);
         f.toupper(&contextWord[0], &contextWord[0] + contextWord.size());
 
         if (dictionary->find(contextWord) == dictionary->end()) {
@@ -86,57 +41,25 @@ vector<WordContext> processContext(const vector<wstring>& stringContext, unorder
             dictionary->emplace(newWord->word, vector<Word*>{newWord});
         }
 
-        vector<Word*> words = dictionary->at(contextWord);
-        contextVector.push_back(words);
+        vector<Word*> &words = dictionary->at(contextWord);
+        contextVector.push_back(words.at(0));
     }
 
-    rawContext.pop_back();
+    wstring normalizedForm;
+    for (Word* word : contextVector)
+        normalizedForm += word->word + L" ";
+    normalizedForm.pop_back();
 
-    return makeAllContexts(contextVector, rawContext);
+    return {normalizedForm,contextVector};
 }
 
-bool haveCommonForm(wstring firstWord, wstring secondWord, unordered_map <wstring, vector<Word*>> *dictionary) {
-    auto& f = std::use_facet<std::ctype<wchar_t>>(std::locale());
-    f.toupper(&firstWord[0], &firstWord[0] + firstWord.size());
-    f.toupper(&secondWord[0], &secondWord[0] + secondWord.size());
-    vector<Word*> words1;
-    vector<Word*> words2;
+void addContextToSet(WordContext& context, unordered_map <wstring, WordContext>* NGramms, const string& filePath) {
+    if (NGramms->find(context.normalizedForm) == NGramms->end())
+        NGramms->emplace(context.normalizedForm, context);
 
-    if (dictionary->find(firstWord) == dictionary->end()) {
-        Word *newWord = new Word();
-        newWord->word = firstWord;
-        newWord->partOfSpeech = L"UNKW";
-        dictionary->emplace(newWord->word, vector<Word*>{newWord});
-    }
-
-    if (dictionary->find(secondWord) == dictionary->end()) {
-        Word *newWord = new Word();
-        newWord->word = secondWord;
-        newWord->partOfSpeech = L"UNKW";
-        dictionary->emplace(newWord->word, vector<Word*>{newWord});
-    }
-
-    words1 = dictionary->at(firstWord);
-    words2 = dictionary->at(secondWord);
-
-    for (Word* word1: words1) {
-        for (Word* word2: words2) {
-            if (word1->word == word2->word)
-                return true;
-        }
-    }
-
-    return false;
-}
-
-void addContextsToSet(vector<WordContext>& contexts, unordered_map <wstring, WordContext>* NGramms, const string& filePath) {
-    for (WordContext context : contexts) {
-        if (NGramms->find(context.normalizedForm) == NGramms->end())
-            NGramms->emplace(context.normalizedForm, context);
-
-        NGramms->at(context.normalizedForm).totalEntryCount++;
-        NGramms->at(context.normalizedForm).textEntry.insert(filePath);
-    }
+    auto &ngram= NGramms->at(context.normalizedForm);
+    ngram.totalEntryCount++;
+    ngram.textEntry.insert(filePath);
 }
 
 void handleWord(const wstring& wordStr, int windowSize,
@@ -144,9 +67,14 @@ void handleWord(const wstring& wordStr, int windowSize,
                 vector<wstring>* leftStringNGrams,
                 unordered_map <wstring, WordContext> *NGrams,
                 const string& filePath) {
-    if (leftStringNGrams->size() == windowSize) {
-        vector<WordContext> phraseContexts = processContext(*leftStringNGrams, dictionary);
-        addContextsToSet(phraseContexts, NGrams, filePath);
+    for (int i = MIN_NGRAM_LENGTH; i <= MAX_NGRAM_LENGTH; i++) {
+        if (i <= leftStringNGrams->size()) {
+            WordContext phraseContext = processContext(*leftStringNGrams, i, dictionary);
+            addContextToSet(phraseContext, NGrams, filePath);
+        }
+    }
+    if (leftStringNGrams->size() == MAX_NGRAM_LENGTH) {
+        hGramsHandled++;
         leftStringNGrams->erase(leftStringNGrams->begin());
     }
 
@@ -194,8 +122,8 @@ void handleFile(const string& filePath, unordered_map <wstring, vector<Word*>> *
     }
 }
 
-void findConcordances(const string& dictPath, const string& corpusPath,
-                      int windowSize, const string& outputFile) {
+void findNGrams(const string& dictPath, const string& corpusPath,
+                int windowSize, const string& outputFile) {
     auto dictionary = initDictionary(dictPath);
     vector<string> files = getFilesFromDir(corpusPath);
 
@@ -209,11 +137,15 @@ void findConcordances(const string& dictPath, const string& corpusPath,
     vector<WordContext> leftContexts;
     leftContexts.reserve(NGrams.size());
 
-    for(const auto& pair : NGrams)
-        leftContexts.push_back(pair.second);
+    for(auto& pair : NGrams)
+        if (pair.second.totalEntryCount >= CONTEXT_FREQUENCY_THRESHOLD) {
+            pair.second.tfidf = ((float) pair.second.totalEntryCount / hGramsHandled) *
+                                log10((float) files.size() / pair.second.textEntry.size() + 1);
+            leftContexts.push_back(pair.second);
+        }
 
     struct {
-        bool operator()(const WordContext& a, const WordContext& b) const { return a.totalEntryCount > b.totalEntryCount; }
+        bool operator()(const WordContext& a, const WordContext& b) const { return a.tfidf > b.tfidf; }
     } comp;
 
     sort(leftContexts.begin(), leftContexts.end(), comp);
@@ -224,14 +156,15 @@ void findConcordances(const string& dictPath, const string& corpusPath,
     cout << "\n";
     for (const WordContext& context : leftContexts) {
         if (context.totalEntryCount >= CONTEXT_FREQUENCY_THRESHOLD) {
-            wcout << "<\"" << context.rawValue
+            wcout << "<\"" << context.normalizedForm
             << "\", Total entries: " << context.totalEntryCount
             << ", TF: " << context.textEntry.size()
+            << ", TF-IDF: " << context.tfidf
             << ">\n";
             printCount++;
         }
 
-        string line = wstring_convert<codecvt_utf8<wchar_t>>().to_bytes(context.rawValue);
+        string line = wstring_convert<codecvt_utf8<wchar_t>>().to_bytes(context.normalizedForm);
         outFile << "<\"" << line << "\", " << context.totalEntryCount << ">\n";
     }
 
@@ -240,6 +173,8 @@ void findConcordances(const string& dictPath, const string& corpusPath,
 
 int main() {
     CONTEXT_FREQUENCY_THRESHOLD = 10;
+    MIN_NGRAM_LENGTH = 2;
+    MAX_NGRAM_LENGTH = 4;
 
     locale::global(locale("ru_RU.UTF-8"));
     wcout.imbue(locale("ru_RU.UTF-8"));
@@ -250,6 +185,6 @@ int main() {
 
     string outputFile = "concordances.txt";
 
-    findConcordances(dictPath, corpusPath, windowSize, outputFile);
+    findNGrams(dictPath, corpusPath, windowSize, outputFile);
     return 0;
 }
