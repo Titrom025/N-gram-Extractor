@@ -13,7 +13,7 @@ public:
     wstring normalizedForm;
     vector<Word*> words;
     int totalEntryCount = 0;
-    double tfidf = 0;
+    double stability = 0;
     set <string> textEntry;
 
     WordContext(const wstring& normalizedForm, vector<Word*> words) {

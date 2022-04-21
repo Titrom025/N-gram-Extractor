@@ -8,6 +8,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <unistd.h>
 
 using namespace std;
 void handle_error(const char* msg) {
@@ -27,9 +28,10 @@ char* map_file(const char* fname, size_t& length)
 
     length = sb.st_size;
 
-    char* addr = static_cast<char*>(mmap(NULL, length, PROT_READ, MAP_PRIVATE, fd, 0u));
+    char* addr = static_cast<char*>(mmap(NULL, length, PROT_READ, MAP_SHARED, fd, 0u));
     if (addr == MAP_FAILED)
         handle_error("mmap");
 
+    close(fd);
     return addr;
 }
